@@ -1,0 +1,297 @@
+using System;
+using System.IO;
+using System.Net.Http;
+using System.Threading.Tasks;
+using HtmlAgilityPack;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+using System.Web;
+
+namespace VideoLinkGrabber
+{
+    class Program
+    {
+        static async Task Main(string[] args)
+        {
+            string baseUrl = "";
+            string contentType = GetUserContentType();
+            if (contentType == "Movies")
+            {
+                baseUrl = "http://www.dmasti.pk/movies/";
+            }
+            else if (contentType == "KidsMovies")
+            {
+                baseUrl = "http://www.dmasti.pk/view/kid/";
+            }
+            else if (contentType == "TVShows")
+            {
+                baseUrl = "http://www.dmasti.pk/view/tvshow/";
+            }
+
+            int startId = 27295;
+            int endId = 100;
+            string date = DateTime.Now.ToString("yyyy-MM-dd");
+            string logFile = $"{contentType}_visited_links.log";
+            string errorLogFile = "error_log.txt";
+            string[] videoExtensions = { ".mp4", ".mkv", ".avi", ".mov", ".flv", ".zip", ".rar" }; // Updated list of video extensions
+
+            // Load the visited links log
+            HashSet<string> visitedLinks = new HashSet<string>();
+            if (File.Exists(logFile))
+            {
+                var loggedLinks = File.ReadAllLines(logFile);
+                foreach (var link in loggedLinks)
+                {
+                    visitedLinks.Add(link);
+                }
+            }
+
+            using (HttpClient client = new HttpClient())
+            {
+                List<string> videoLinks = new List<string>();
+
+                for (int id = startId; id >= endId; id--)
+                {
+                    string url = $"{baseUrl}{id}";
+                    LogMessage(logFile, $"Processing URL: {url}");
+
+                    if (visitedLinks.Contains(url))
+                    {
+                        Console.WriteLine($"Skipping already visited URL: {url}");
+                        LogMessage(logFile, $"Skipping already visited URL: {url}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        HttpResponseMessage response = await client.GetAsync(url);
+                        LogMessage(logFile, $"Response status code: {response.StatusCode} for URL: {url}");
+
+                        if (response.IsSuccessStatusCode)
+                        {
+                            string responseBody = await response.Content.ReadAsStringAsync();
+                            HtmlDocument doc = new HtmlDocument();
+                            doc.LoadHtml(responseBody);
+
+                            var linkNodes = doc.DocumentNode.SelectNodes("//a[@href]");
+                            LogMessage(logFile, $"Found {linkNodes?.Count ?? 0} <a> nodes for URL: {url}");
+
+                            string videoLink = null;
+                            if (linkNodes != null)
+                            {
+                                foreach (var linkNode in linkNodes)
+                                {
+                                    string href = linkNode.GetAttributeValue("href", string.Empty);
+                                    if (!string.IsNullOrEmpty(href) && Array.Exists(videoExtensions, ext => href.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        videoLink = href.StartsWith("http") ? href : new Uri(new Uri(url), href).ToString();
+                                        LogMessage(logFile, $"Found video link: {videoLink} for URL: {url}");
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (videoLink != null)
+                            {
+                                if (contentType == "TVShows")
+                                {
+                                    string title = GetCleanTitle(doc);
+                                    string season = GetSeason(doc);
+                                    string episode = GetEpisode(doc);
+
+                                    LogMessage(logFile, $"Parsed title: {title}, season: {season}, episode: {episode} for URL: {url}");
+
+                                    if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(season))
+                                    {
+                                        string folderPath = Path.Combine(contentType, title, season);
+                                        string fileName = $"{episode}.strm";
+
+                                        SaveStreamFile(folderPath, fileName, videoLink, logFile, url);
+                                    }
+                                    else
+                                    {
+                                        LogMessage(logFile, $"Missing title, season, or episode for URL: {url}");
+                                    }
+                                }
+                                else
+                                {
+                                    string country = GetCountry(doc);
+                                    int rating = GetRating(doc);
+
+                                    LogMessage(logFile, $"Parsed country: {country}, rating: {rating} for URL: {url}");
+
+                                    if (rating > 0)
+                                    {
+                                        string ratingFolder = Path.Combine(contentType, rating.ToString());
+                                        string regionFolder = GetRegionFolder(ratingFolder, country);
+                                        string fileName = $"{Path.GetFileNameWithoutExtension(videoLink)}.strm";
+
+                                        SaveStreamFile(regionFolder, fileName, videoLink, logFile, url);
+                                    }
+                                    else
+                                    {
+                                        LogMessage(logFile, $"Invalid rating for URL: {url}");
+                                    }
+                                }
+
+                                videoLinks.Add(videoLink);
+                            }
+                            else
+                            {
+                                LogMessage(logFile, $"No video link found for URL {url}. Will review in the next cycle.");
+                            }
+                        }
+                        else
+                        {
+                            LogMessage(errorLogFile, $"Failed to load URL {url}: Status code {response.StatusCode}");
+                        }
+                    }
+                    catch (HttpRequestException e)
+                    {
+                        LogMessage(errorLogFile, $"Request error for URL {url}: {e.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage(errorLogFile, $"Unexpected error for URL {url}: {ex.Message}");
+                    }
+
+                    // Always log the visited URL
+                    visitedLinks.Add(url);
+                    File.AppendAllLines(logFile, new[] { url });
+                }
+
+                try
+                {
+                    string outputFile = $"{contentType}_links_{date}.txt";
+                    File.WriteAllLines(outputFile, videoLinks);
+                    Console.WriteLine($"All video links have been saved to {outputFile}");
+                }
+                catch (Exception ex)
+                {
+                    LogMessage(errorLogFile, $"Error writing output file: {ex.Message}");
+                }
+            }
+        }
+
+        static string GetUserContentType()
+        {
+            Console.WriteLine("What you want to fetch? Options: 1. Movies, 2. KidsMovies, 3. TVShows");
+            string input = Console.ReadLine().Trim();
+            while (input != "1" && input != "2" && input != "3")
+            {
+                Console.WriteLine("Invalid option. Please enter 1, 2, or 3");
+                input = Console.ReadLine().Trim();
+            }
+
+            return input switch
+            {
+                "1" => "Movies",
+                "2" => "KidsMovies",
+                "3" => "TVShows",
+                _ => throw new InvalidOperationException("Invalid input")
+            };
+        }
+
+        static string GetCountry(HtmlDocument doc)
+        {
+            var countryNode = doc.DocumentNode.SelectSingleNode("//div[contains(text(),'Country:')]/following-sibling::div");
+            return countryNode != null ? CleanString(countryNode.InnerText.Trim()) : "Others";
+        }
+
+        static int GetRating(HtmlDocument doc)
+        {
+            var ratingNode = doc.DocumentNode.SelectSingleNode("//div[@class='post-ratings']//span[contains(text(),'IMDb')]");
+            if (ratingNode != null)
+            {
+                string ratingText = ratingNode.ParentNode.InnerText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)[1];
+                if (double.TryParse(ratingText, out double rating))
+                {
+                    return (int)Math.Floor(rating);
+                }
+            }
+            return 0;
+        }
+
+        static string GetRegionFolder(string ratingFolder, string country)
+        {
+            string region = country switch
+            {
+                "United States" => "United States",
+                "India" => "India",
+                "China" => "China",
+                "Pakistan" => "Pakistan",
+                _ => "Others"
+            };
+            return Path.Combine(ratingFolder, region);
+        }
+
+        static string GetCleanTitle(HtmlDocument doc)
+        {
+            var titleNode = doc.DocumentNode.SelectSingleNode("//div[@class='page_title event']");
+            if (titleNode != null)
+            {
+                string fullTitle = titleNode.InnerText.Trim();
+                string title = Regex.Match(fullTitle, @"^(.*?):").Groups[1].Value.Trim();
+                return CleanString(title);
+            }
+            return null;
+        }
+
+        static string GetSeason(HtmlDocument doc)
+        {
+            var seasonNode = doc.DocumentNode.SelectSingleNode("//span[@class='season']");
+            return seasonNode != null ? CleanString(seasonNode.InnerText.Trim()) : null;
+        }
+
+        static string GetEpisode(HtmlDocument doc)
+        {
+            var episodeNode = doc.DocumentNode.SelectSingleNode("//span[@class='episode']");
+            return episodeNode != null ? CleanString(episodeNode.InnerText.Trim()) : null;
+        }
+
+        static string CleanString(string input)
+        {
+            string decoded = HttpUtility.HtmlDecode(input);
+            decoded = decoded.Replace("&nbsp;", " ");
+            decoded = Regex.Replace(decoded, @"[^\w\s-]", ""); // Remove all non-word characters except for spaces and hyphens
+            return decoded.Trim();
+        }
+
+        static void SaveStreamFile(string folderPath, string fileName, string videoLink, string logFile, string url)
+        {
+            try
+            {
+                Directory.CreateDirectory(folderPath);
+                File.WriteAllText(Path.Combine(folderPath, fileName), videoLink);
+                Console.WriteLine($"Saved: {Path.Combine(folderPath, fileName)}");
+                LogMessage(logFile, $"Saved stream file: {fileName} for URL: {url}");
+            }
+            catch (Exception ex)
+            {
+                LogMessage("error_log.txt", $"Error creating .strm file for {videoLink}: {ex.Message}");
+            }
+        }
+
+        static void LogMessage(string logFile, string message)
+        {
+            Console.WriteLine(message);
+            File.AppendAllLines(logFile, new[] { message });
+        }
+    }
+
+    class Category
+    {
+        public string Name { get; }
+        public string BaseUrl { get; }
+        public int StartId { get; }
+        public int EndId { get; }
+
+        public Category(string name, string baseUrl, int startId, int endId)
+        {
+            Name = name;
+            BaseUrl = baseUrl;
+            StartId = startId;
+            EndId = endId;
+        }
+    }
+}
