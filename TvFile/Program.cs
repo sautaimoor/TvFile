@@ -142,6 +142,8 @@ namespace VideoLinkGrabber
 
         public static async Task Main(string[] args)
         {
+            int startId = 30000;
+            int endId = 100;
             string baseUrl = "";
             string contentType = GetUserContentType();
             if (contentType == "Movies")
@@ -150,6 +152,7 @@ namespace VideoLinkGrabber
             }
             else if (contentType == "KidsMovies")
             {
+                startId = 10000;
                 baseUrl = "http://www.dmasti.pk/view/kid/";
             }
             else if (contentType == "TVShows")
@@ -157,8 +160,9 @@ namespace VideoLinkGrabber
                 baseUrl = "http://www.dmasti.pk/view/tvshow/";
             }
 
-            int startId = 27295;
-            int endId = 100;
+            
+            int totalIds = startId - endId + 1; // Total number of iterations
+
             string date = DateTime.Now.ToString("yyyy-MM-dd");
             string logFile = $"{contentType}_visited_links.log";
             string errorLogFile = "error_log.txt";
@@ -181,6 +185,11 @@ namespace VideoLinkGrabber
 
                 for (int id = startId; id >= endId; id--)
                 {
+                    int currentIteration = startId - id + 1;
+                    double percentage = (currentIteration * 100.0) / totalIds;
+
+                    Console.WriteLine($"Processing ID: {id}, Progress: {percentage:F2}%");
+
                     string url = $"{baseUrl}{id}";
                     if (visitedLinks.Contains(url))
                     {
@@ -220,6 +229,7 @@ namespace VideoLinkGrabber
                             //string moviePoster = fileNameText + "_poster.jpg";
                             //string movieFanart = fileNameText + "_fanart.jpg";
                             string strmPath="";
+                            string fileTitle = "";
 
                             if (videoLink != null)
                             {
@@ -228,9 +238,11 @@ namespace VideoLinkGrabber
                                     string title = ReplaceUnderscoresWithSpaces(GetCleanTitle(doc));
                                     string season = ReplaceUnderscoresWithSpaces(GetSeason(doc));
                                     string episode = ReplaceUnderscoresWithSpaces(GetEpisode(doc));
+                                    title = RemoveInvalidCharacters(title);
 
                                     if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(season) && !string.IsNullOrEmpty(episode))
                                     {
+                                        fileTitle = title;
                                         string folderPath = Path.Combine(contentType, title, season);
 
                                         strmPath = folderPath;
@@ -249,7 +261,11 @@ namespace VideoLinkGrabber
                                     string country = GetCountry(doc);
                                     int rating = GetRating(doc);
                                     
-
+                                    if (rating==0)
+                                    {
+                                        // comments on console in red that rating zero found
+                                        Console.WriteLine($"Rating is zero for {url}");
+                                    }
                                     if (rating > -1)
                                     {                                        
                                         string ratingFolder = Path.Combine(contentType, rating.ToString());
@@ -260,14 +276,14 @@ namespace VideoLinkGrabber
                                         // Download and save poster and fanart in the movie folder
                                         //DownloadImage(GetPosterUrl(doc), Path.Combine(regionFolder, moviePoster));
                                         //DownloadImage(GetFanartUrl(doc), Path.Combine(regionFolder, movieFanart));
-
+                                        fileTitle = Path.GetFileNameWithoutExtension(videoLink);
                                         string fileName = $"{Path.GetFileNameWithoutExtension(videoLink)}.strm";
                                         fileName = RemoveInvalidCharacters(fileName);
                                         SaveStreamFile(regionFolder, fileName, videoLink, logFile, url);
                                     }
                                 }
                                 // Process HTML content (Movie, TVShows, KidsMovies)
-                                ProcessHtml(responseBody, contentType, strmPath);
+                                ProcessHtml(responseBody, contentType, strmPath, RemoveInvalidCharacters(fileTitle));
 
                                 videoLinks.Add(videoLink);
                             }
@@ -338,6 +354,28 @@ namespace VideoLinkGrabber
                 if (double.TryParse(ratingText, out double rating))
                 {
                     return (int)Math.Floor(rating);
+                }
+            }
+            return GetRating_IMDb(doc);            
+        }
+        static int GetRating_IMDb(HtmlDocument doc)
+        {
+            var ratingNode = doc.DocumentNode.SelectSingleNode("//div[@class='post-ratings']//span[contains(text(),'IMDb')]");
+            if (ratingNode != null)
+            {
+                // Extract the text content of the parent node
+                string ratingText = ratingNode.ParentNode.InnerText;
+
+                // Find the position of "IMDb" and extract the rating that follows
+                int imdbIndex = ratingText.IndexOf("IMDb");
+                if (imdbIndex != -1)
+                {
+                    string ratingSubstring = ratingText.Substring(imdbIndex + "IMDb".Length).Trim();
+                    string[] parts = ratingSubstring.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length > 0 && double.TryParse(parts[0], out double rating))
+                    {
+                        return (int)Math.Floor(rating);
+                    }
                 }
             }
             return 0;
@@ -498,10 +536,11 @@ namespace VideoLinkGrabber
         {
             // Find the div with class "image_wrapper2 event" and the <img> tag inside it
             var imgNode = doc.DocumentNode.SelectSingleNode("//div[@class='image_wrapper2 event']//img");
-
+            if (imgNode == null) { imgNode = doc.DocumentNode.SelectSingleNode("//div[@class='image_wrapper2 event shadows']//img"); }
             // Check if the image node exists
             if (imgNode != null)
             {
+                
                 // Extract the 'src' attribute, which contains the URL of the image
                 string posterUrl = imgNode.GetAttributeValue("src", "").Trim();
                 return posterUrl;
@@ -522,7 +561,30 @@ namespace VideoLinkGrabber
                 return fanartUrl;
             }
 
-            return null; // Return null if the fanart URL is not found
+            return GetFanartUrl_IMG(doc);
+        }
+
+        public static string GetFanartUrl_IMG(HtmlDocument doc)
+        {
+            // Find the node with the style attribute containing the image URL
+            var node = doc.DocumentNode.SelectSingleNode("//div[contains(@class, 'columns-container')]");
+
+            if (node != null)
+            {
+                // Extract the style attribute value
+                var style = node.GetAttributeValue("style", string.Empty);
+
+                // Find the URL within the style attribute
+                var urlStart = style.IndexOf("url('") + 5;
+                var urlEnd = style.IndexOf("')", urlStart);
+
+                if (urlStart > 4 && urlEnd > urlStart)
+                {
+                    return style.Substring(urlStart, urlEnd - urlStart);
+                }
+            }
+
+            return null;
         }
 
         public static string RemoveInvalidCharacters(string fileName)
@@ -531,15 +593,45 @@ namespace VideoLinkGrabber
             string invalidCharsPattern = @"[\\/:*?""<>|]";
 
             // Replace invalid characters with an empty string
-            return Regex.Replace(fileName, invalidCharsPattern, string.Empty);
+            return ExtractTitle(Regex.Replace(fileName, invalidCharsPattern, string.Empty));
         }
-        public static void ProcessHtml(string responseBody, string category,string path)
+        //public static string ExtractTitle(string input)
+        //{
+        //    // Remove the year and format (e.g., BRRip, HDRip, WEBRip)
+        //    string pattern = @"-\d{4}-(BRRip|HDRip|WEBRip|CAMRip)";
+        //    string cleaned = Regex.Replace(input, pattern, "");
+
+        //    // Replace hyphens with spaces
+        //    cleaned = cleaned.Replace("-", " ");
+        //    cleaned = cleaned.Replace("Hindi", "Urdu");
+        //    cleaned = cleaned.Replace("English", string.Empty);
+        //    cleaned = cleaned.Replace("Dubbed", string.Empty);
+
+        //    return cleaned.Trim();
+        //}
+        public static string ExtractTitle(string input)
+        {
+            // Remove the year and format (e.g., BRRip, HDRip, WEBRip)
+            //string pattern = @"-\d{4}\s*-\s*(BRRip|HDRip|WEBRip|CAMRip)";
+            string pattern = @"(\d{4}(BDRip|DvdRip|DVDRip|BrRip|BRRip|HDRip|WEBRip|CAMRip))|(-\d{4}-(BDRip|DvdRip|DVDRip|BrRip|BRRip|HDRip|WEBRip|CAMRip))|(-\d{4}\s*-\s*(BDRip|DvdRip|DVDRip|BrRip|BRRip|HDRip|WEBRip|CAMRip))";
+            string cleaned = Regex.Replace(input, pattern, "");
+
+            // Replace hyphens with spaces
+            cleaned = cleaned.Replace("-", " ");
+            cleaned = cleaned.Replace("  ", " ");
+            cleaned = cleaned.Replace("Hindi", string.Empty);
+            cleaned = cleaned.Replace("English", string.Empty);
+            cleaned = cleaned.Replace("Dubbed", string.Empty);
+
+            return cleaned.Trim();
+        }
+        public static void ProcessHtml(string responseBody, string category,string path,string filename)
         {
             HtmlDocument doc = new HtmlDocument();
             doc.LoadHtml(responseBody);
 
             // Call parsing functions to extract metadata
-            string title = RemoveInvalidCharacters(GetTitle(doc));
+            string title = filename; // RemoveInvalidCharacters(GetTitle(doc));
             string year = GetYear(doc);
             string plot = GetPlot(doc);
             string director = GetDirector(doc);
@@ -571,7 +663,8 @@ namespace VideoLinkGrabber
 
             // Create the .nfo file
             string nfoFilePath = Path.Combine(path, $"{title}.nfo");
-            GenerateNfoFile(nfoFilePath, title, year, plot, director, actors, genres, posterFilePath, fanartFilePath);
+            //GenerateNfoFile(nfoFilePath, title, year, plot, director, actors, genres, posterFilePath, fanartFilePath);
+            GenerateNfoFile(nfoFilePath, title, year, plot, director, actors, genres, moviePoster, movieFanart);
 
             Console.WriteLine($"Processed: {title} ({year})");
         }
